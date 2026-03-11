@@ -15,7 +15,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery
 
 from app.keyboards.user import get_back_to_main_menu_keyboard
-from app.services.content import content_service
+from app.services.shift_poll import shift_poll_service
 from app.services.sheets import sheets_service
 from app.states.ask_question import AskQuestionStates
 from app.utils.helpers import now_iso
@@ -46,10 +46,17 @@ async def shift_poll_answer(callback: CallbackQuery, state: FSMContext) -> None:
         await callback.answer("Пользователь не найден.", show_alert=True)
         return
 
-    settings_dict = await content_service.get_settings()
-    shift_date = settings_dict.get(f"shift_poll_date_{campaign_id}", "")
-    question_text = settings_dict.get(
-        f"shift_poll_text_{campaign_id}",
+    campaign = shift_poll_service.get_campaign(campaign_id)
+    if not campaign:
+        await callback.answer(
+            "Не удалось найти данные опроса. Возможно, бот перезапускался.",
+            show_alert=True,
+        )
+        return
+
+    shift_date = campaign.get("shift_date", "")
+    question_text = campaign.get(
+        "question_text",
         "Вы откликнулись на смену, подскажите, Вы выйдете на задание?",
     )
 
