@@ -41,7 +41,6 @@ async def back_to_main_menu(message: Message) -> None:
         await message.answer("Сначала завершите регистрацию через /start")
         return
 
-    sheets_service.update_user_last_seen(message.from_user.id)
     is_admin = await content_service.is_admin(message.from_user.id)
     main_menu_text = await content_service.get_text(
         "main_menu_text",
@@ -63,7 +62,6 @@ async def more_jobs_handler(message: Message) -> None:
         await message.answer("Сначала завершите регистрацию через /start")
         return
 
-    sheets_service.update_user_last_seen(message.from_user.id)
     await _send_content_block(
         message,
         content_key="more_jobs",
@@ -80,7 +78,6 @@ async def support_chat_handler(message: Message) -> None:
         await message.answer("Сначала завершите регистрацию через /start")
         return
 
-    sheets_service.update_user_last_seen(message.from_user.id)
     await _send_content_block(
         message,
         content_key="support_chat",
@@ -97,7 +94,6 @@ async def training_handler(message: Message) -> None:
         await message.answer("Сначала завершите регистрацию через /start")
         return
 
-    sheets_service.update_user_last_seen(message.from_user.id)
     await _send_content_block(
         message,
         content_key="training",
