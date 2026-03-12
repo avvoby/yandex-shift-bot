@@ -1,19 +1,10 @@
 """
 Сценарий "Задать вопрос".
-
-Логика:
-1. Пользователь нажимает "Задать вопрос"
-2. Бот просит отправить текст вопроса
-3. Пользователь отправляет вопрос
-4. Бот:
-   - сохраняет вопрос в Google Sheets
-   - пересылает вопрос в чат поддержки
-   - отвечает пользователю, что вопрос передан коллегам
 """
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from app.keyboards.user import get_back_to_main_menu_keyboard, get_main_menu_keyboard
 from app.services.content import content_service
@@ -22,6 +13,10 @@ from app.states.ask_question import AskQuestionStates
 from app.utils.helpers import now_iso
 
 router = Router()
+
+
+def _is_private_chat(message: Message) -> bool:
+    return message.chat.type == "private"
 
 
 async def _is_registered(telegram_id: int) -> bool:
@@ -34,9 +29,9 @@ async def _is_registered(telegram_id: int) -> bool:
 
 @router.message(F.text == "Задать вопрос")
 async def ask_question_entry(message: Message, state: FSMContext) -> None:
-    """
-    Вход в сценарий "Задать вопрос".
-    """
+    if not _is_private_chat(message):
+        return
+
     if not await _is_registered(message.from_user.id):
         await message.answer("Сначала завершите регистрацию через /start")
         return
@@ -55,11 +50,30 @@ async def ask_question_entry(message: Message, state: FSMContext) -> None:
     await state.set_state(AskQuestionStates.waiting_for_question_text)
 
 
+@router.callback_query(F.data == "faq_no_answer")
+async def ask_question_from_faq(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None or callback.message.chat.type != "private":
+        await callback.answer()
+        return
+
+    prompt_text = await content_service.get_text(
+        "ask_question_prompt",
+        default="Напишите ваш вопрос. Мы передадим его коллегам.",
+    )
+
+    await callback.message.answer(
+        prompt_text,
+        reply_markup=get_back_to_main_menu_keyboard(),
+    )
+    await state.set_state(AskQuestionStates.waiting_for_question_text)
+    await callback.answer()
+
+
 @router.message(AskQuestionStates.waiting_for_question_text, F.text == "Назад в главное меню")
 async def ask_question_cancel(message: Message, state: FSMContext) -> None:
-    """
-    Отмена сценария вопроса и возврат в главное меню.
-    """
+    if not _is_private_chat(message):
+        return
+
     await state.clear()
 
     is_admin = await content_service.is_admin(message.from_user.id)
@@ -76,9 +90,9 @@ async def ask_question_cancel(message: Message, state: FSMContext) -> None:
 
 @router.message(AskQuestionStates.waiting_for_question_text, F.text)
 async def ask_question_receive_text(message: Message, state: FSMContext) -> None:
-    """
-    Получаем текст вопроса, логируем и пересылаем в чат поддержки.
-    """
+    if not _is_private_chat(message):
+        return
+
     question_text = message.text.strip()
 
     if len(question_text) < 2:
