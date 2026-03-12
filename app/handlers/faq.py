@@ -42,7 +42,6 @@ async def faq_entry(message: Message) -> None:
         await message.answer("Сначала завершите регистрацию через /start")
         return
 
-    sheets_service.update_user_last_seen(message.from_user.id)
 
     categories = await content_service.get_faq_categories()
     category_names = [item["category"] for item in categories]
