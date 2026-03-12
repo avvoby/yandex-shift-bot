@@ -40,7 +40,6 @@ class ContentService:
         settings_dict = sheets_service.get_settings_dict()
         admin_ids = sheets_service.get_active_admin_ids()
 
-        # first_day_flow и client_sections могут появиться позже — не падаем, если листов ещё нет
         try:
             first_day_rows = sheets_service.get_all_records("first_day_flow")
         except Exception:
@@ -73,7 +72,6 @@ class ContentService:
                 "updated_at": str(row.get("updated_at", "")).strip(),
             }
 
-        # FAQ
         faq_categories: list[dict[str, Any]] = []
         category_map: dict[str, dict[str, Any]] = {}
 
@@ -108,7 +106,6 @@ class ContentService:
         for item in faq_categories:
             item["questions"].sort(key=lambda x: (x["sort_order_question"], x["question"]))
 
-        # first_day_flow
         first_day_steps = []
         for row in first_day_rows:
             step = safe_int(row.get("step"), 0)
@@ -137,7 +134,6 @@ class ContentService:
 
         first_day_steps.sort(key=lambda x: x["step"])
 
-        # client_sections
         clients_map: dict[str, list[dict[str, Any]]] = {}
         for row in client_rows:
             client_name = str(row.get("client_name", "")).strip()
@@ -146,6 +142,7 @@ class ContentService:
             text = str(row.get("text", "")).strip()
             buttons_json = str(row.get("buttons_json", "")).strip()
             file_id = str(row.get("file_id", "")).strip()
+            file_type = str(row.get("file_type", "")).strip()
             sort_order = safe_int(row.get("sort_order"), 0)
 
             if not client_name or not section_key or not section_title:
@@ -168,6 +165,7 @@ class ContentService:
                     "text": text,
                     "buttons": buttons,
                     "file_id": file_id,
+                    "file_type": file_type,
                     "sort_order": sort_order,
                 }
             )
