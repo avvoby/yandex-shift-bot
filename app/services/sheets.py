@@ -1,15 +1,5 @@
 """
 Работа с Google Sheets.
-
-Что делает этот файл:
-- подключается к Google Sheets через service account
-- читает листы
-- добавляет строки
-- обновляет строки пользователей
-- предоставляет удобные методы для всего проекта
-
-Важно:
-Google Sheets мы используем как "простую базу данных" для первой версии.
 """
 
 import logging
@@ -25,18 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 class GoogleSheetsService:
-    """
-    Класс для работы с Google Sheets.
-    """
-
     def __init__(self) -> None:
         self._client: gspread.Client | None = None
         self._spreadsheet = None
 
     def _get_client(self) -> gspread.Client:
-        """
-        Создаем клиент Google Sheets один раз.
-        """
         if self._client is not None:
             return self._client
 
@@ -54,9 +37,6 @@ class GoogleSheetsService:
         return self._client
 
     def _get_spreadsheet(self):
-        """
-        Открываем Google-таблицу по ID.
-        """
         if self._spreadsheet is not None:
             return self._spreadsheet
 
@@ -65,49 +45,28 @@ class GoogleSheetsService:
         return self._spreadsheet
 
     def get_worksheet(self, title: str):
-        """
-        Возвращает лист по названию.
-        """
         spreadsheet = self._get_spreadsheet()
         return spreadsheet.worksheet(title)
 
     def get_all_records(self, sheet_name: str) -> list[dict[str, Any]]:
-        """
-        Читаем весь лист как список словарей.
-        Первая строка листа должна содержать заголовки колонок.
-        """
         worksheet = self.get_worksheet(sheet_name)
         return worksheet.get_all_records()
 
     def append_row(self, sheet_name: str, row: list[Any]) -> None:
-        """
-        Добавляем одну строку в конец листа.
-        """
         worksheet = self.get_worksheet(sheet_name)
         worksheet.append_row(row, value_input_option="USER_ENTERED")
 
     def ensure_sheet_exists(self, sheet_name: str, headers: list[str]) -> None:
-        """
-        Убеждаемся, что лист существует.
-        Если листа нет — создаем и записываем заголовки.
-        """
         spreadsheet = self._get_spreadsheet()
 
         try:
             spreadsheet.worksheet(sheet_name)
         except gspread.WorksheetNotFound:
-            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=20)
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
             worksheet.append_row(headers, value_input_option="USER_ENTERED")
             logger.info("Создан лист %s", sheet_name)
 
     def find_user_row_index(self, telegram_id: int) -> int | None:
-        """
-        Ищем строку пользователя по telegram_id в листе users.
-        Возвращаем номер строки в Google Sheets (начиная с 1).
-        Важно:
-        - строка 1 — заголовки
-        - реальные данные обычно с 2 строки
-        """
         records = self.get_all_records("users")
         for index, row in enumerate(records, start=2):
             if str(row.get("telegram_id", "")).strip() == str(telegram_id):
@@ -115,9 +74,6 @@ class GoogleSheetsService:
         return None
 
     def get_user_by_telegram_id(self, telegram_id: int) -> dict[str, Any] | None:
-        """
-        Возвращает пользователя из листа users по telegram_id.
-        """
         records = self.get_all_records("users")
         for row in records:
             if str(row.get("telegram_id", "")).strip() == str(telegram_id):
@@ -132,76 +88,67 @@ class GoogleSheetsService:
         last_name: str,
         full_name_entered: str,
         phone_entered: str,
+        privacy_policy_accepted: bool = True,
+        terms_of_use_accepted: bool = True,
     ) -> None:
-        """
-        Создаем или обновляем пользователя в листе users.
-
-        user_id для первой версии можно хранить равным telegram_id.
-        """
         sheet_name = "users"
         row_index = self.find_user_row_index(telegram_id)
 
         if row_index is None:
-            # Новый пользователь
             row = [
-                str(telegram_id),              # user_id
-                str(telegram_id),              # telegram_id
+                str(telegram_id),
+                str(telegram_id),
                 username,
                 first_name,
                 last_name,
                 full_name_entered,
                 phone_entered,
-                now_iso(),                     # registered_at
-                "registered",                  # registration_status
-                "FALSE",                       # is_blocked
-                now_iso(),                     # last_seen_at
+                now_iso(),
+                "registered",
+                "FALSE",
+                now_iso(),
+                "TRUE" if privacy_policy_accepted else "FALSE",
+                "TRUE" if terms_of_use_accepted else "FALSE",
             ]
             self.append_row(sheet_name, row)
             logger.info("Добавлен новый пользователь telegram_id=%s", telegram_id)
             return
 
-        # Обновляем существующего пользователя
+        existing_user = self.get_user_by_telegram_id(telegram_id) or {}
+
         worksheet = self.get_worksheet(sheet_name)
         worksheet.update(
-            f"A{row_index}:K{row_index}",
+            f"A{row_index}:M{row_index}",
             [[
-                str(telegram_id),              # user_id
-                str(telegram_id),              # telegram_id
+                str(telegram_id),
+                str(telegram_id),
                 username,
                 first_name,
                 last_name,
                 full_name_entered,
                 phone_entered,
-                self.get_user_by_telegram_id(telegram_id).get("registered_at", now_iso()),  # type: ignore[union-attr]
+                existing_user.get("registered_at", now_iso()),
                 "registered",
                 "FALSE",
                 now_iso(),
+                "TRUE" if privacy_policy_accepted else "FALSE",
+                "TRUE" if terms_of_use_accepted else "FALSE",
             ]],
         )
         logger.info("Обновлен пользователь telegram_id=%s", telegram_id)
 
     def update_user_last_seen(self, telegram_id: int) -> None:
-        """
-        Обновляем last_seen_at у пользователя.
-        """
         row_index = self.find_user_row_index(telegram_id)
         if row_index is None:
             return
 
         worksheet = self.get_worksheet("users")
-        # Колонка K = last_seen_at
         worksheet.update(f"K{row_index}", [[now_iso()]])
 
     def get_all_users(self) -> list[dict[str, Any]]:
-        """
-        Получаем всех пользователей.
-        """
         return self.get_all_records("users")
 
     def get_active_admin_ids(self) -> list[int]:
-        """
-        Возвращаем список telegram_id активных админов.
-        """
         records = self.get_all_records("admins")
         result: list[int] = []
 
@@ -224,9 +171,6 @@ class GoogleSheetsService:
         forwarded_to_chat: str,
         status: str = "sent",
     ) -> None:
-        """
-        Сохраняем обращение пользователя в support_requests.
-        """
         row = [
             now_iso(),
             str(telegram_id),
@@ -254,9 +198,6 @@ class GoogleSheetsService:
         fail_count: int,
         status: str,
     ) -> None:
-        """
-        Сохраняем информацию о рассылке в broadcasts_log.
-        """
         row = [
             now_iso(),
             str(admin_telegram_id),
@@ -286,12 +227,9 @@ class GoogleSheetsService:
         answer: str,
         answered_at: str,
     ) -> None:
-        """
-        Сохраняем ответ пользователя на опрос по смене.
-        """
         row = [
             campaign_id,
-            now_iso(),      # created_at
+            now_iso(),
             shift_date,
             str(telegram_id),
             username,
@@ -304,9 +242,6 @@ class GoogleSheetsService:
         self.append_row("shift_confirmations", row)
 
     def get_settings_dict(self) -> dict[str, str]:
-        """
-        Читаем лист settings и превращаем в словарь key -> value.
-        """
         records = self.get_all_records("settings")
         result: dict[str, str] = {}
 
@@ -318,11 +253,32 @@ class GoogleSheetsService:
 
         return result
 
+    def find_client_section_row_index(self, client_name: str, section_key: str) -> int | None:
+        records = self.get_all_records("client_sections")
+        for index, row in enumerate(records, start=2):
+            row_client_name = str(row.get("client_name", "")).strip()
+            row_section_key = str(row.get("section_key", "")).strip()
+
+            if row_client_name == client_name and row_section_key == section_key:
+                return index
+        return None
+
+    def update_client_section_file(
+        self,
+        client_name: str,
+        section_key: str,
+        file_id: str,
+        file_type: str,
+    ) -> bool:
+        row_index = self.find_client_section_row_index(client_name, section_key)
+        if row_index is None:
+            return False
+
+        worksheet = self.get_worksheet("client_sections")
+        worksheet.update(f"F{row_index}:G{row_index}", [[file_id, file_type]])
+        return True
+
     def ensure_required_sheets(self) -> None:
-        """
-        Создаем листы, если их еще нет.
-        Это полезно на старте проекта.
-        """
         self.ensure_sheet_exists(
             "users",
             [
@@ -337,6 +293,8 @@ class GoogleSheetsService:
                 "registration_status",
                 "is_blocked",
                 "last_seen_at",
+                "privacy_policy_accepted",
+                "terms_of_use_accepted",
             ],
         )
 
@@ -428,6 +386,29 @@ class GoogleSheetsService:
             ],
         )
 
+        self.ensure_sheet_exists(
+            "first_day_flow",
+            [
+                "step",
+                "title",
+                "text",
+                "buttons_json",
+            ],
+        )
 
-# Один общий объект сервиса на весь проект
+        self.ensure_sheet_exists(
+            "client_sections",
+            [
+                "client_name",
+                "section_key",
+                "section_title",
+                "text",
+                "buttons_json",
+                "file_id",
+                "file_type",
+                "sort_order",
+            ],
+        )
+
+
 sheets_service = GoogleSheetsService()
