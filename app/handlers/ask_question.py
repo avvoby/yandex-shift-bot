@@ -36,7 +36,6 @@ async def ask_question_entry(message: Message, state: FSMContext) -> None:
         await message.answer("Сначала завершите регистрацию через /start")
         return
 
-    sheets_service.update_user_last_seen(message.from_user.id)
 
     prompt_text = await content_service.get_text(
         "ask_question_prompt",
