@@ -1,208 +1,414 @@
 """
-Раздел "Особенности разных заказчиков".
+Работа с Google Sheets.
 """
 
-from aiogram import F, Router
-from aiogram.types import CallbackQuery, Message
+import logging
+from typing import Any
 
-from app.keyboards.user import (
-    get_client_section_actions_keyboard,
-    get_client_sections_keyboard,
-    get_clients_keyboard,
-    get_main_menu_keyboard,
-)
-from app.services.content import content_service
-from app.services.sheets import sheets_service
+import gspread
+from google.oauth2.service_account import Credentials
 
-router = Router()
+from app.config import settings
+from app.utils.helpers import bool_from_sheet, now_iso
+
+logger = logging.getLogger(__name__)
 
 
-def _is_private_message(message: Message) -> bool:
-    return message.chat.type == "private"
+class GoogleSheetsService:
+    def __init__(self) -> None:
+        self._client: gspread.Client | None = None
+        self._spreadsheet = None
 
+    def _get_client(self) -> gspread.Client:
+        if self._client is not None:
+            return self._client
 
-def _is_private_callback(callback: CallbackQuery) -> bool:
-    return callback.message is not None and callback.message.chat.type == "private"
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
 
-
-async def _is_registered(telegram_id: int) -> bool:
-    user = sheets_service.get_user_by_telegram_id(telegram_id)
-    if not user:
-        return False
-    status = str(user.get("registration_status", "")).strip().lower()
-    return status == "registered"
-
-
-@router.message(F.text == "Особенности разных заказчиков")
-async def clients_entry(message: Message) -> None:
-    if not _is_private_message(message):
-        return
-
-    if not await _is_registered(message.from_user.id):
-        await message.answer("Сначала завершите регистрацию через /start")
-        return
-
-    clients = await content_service.get_clients()
-    client_names = [item["client_name"] for item in clients]
-
-    if not client_names:
-        await message.answer("Раздел пока не заполнен.")
-        return
-
-    await message.answer(
-        "Выберите заказчика:",
-        reply_markup=get_clients_keyboard(client_names),
-    )
-
-
-@router.callback_query(F.data == "clients_back_to_main")
-async def clients_back_to_main(callback: CallbackQuery) -> None:
-    if not _is_private_callback(callback):
-        await callback.answer()
-        return
-
-    is_admin = await content_service.is_admin(callback.from_user.id)
-    main_menu_text = await content_service.get_text(
-        "main_menu_text",
-        default="Выберите нужный раздел.",
-    )
-
-    if callback.message:
-        await callback.message.answer(
-            main_menu_text,
-            reply_markup=get_main_menu_keyboard(is_admin=is_admin),
+        credentials = Credentials.from_service_account_file(
+            settings.GOOGLE_CREDENTIALS_FILE,
+            scopes=scopes,
         )
 
-    await callback.answer()
+        self._client = gspread.authorize(credentials)
+        return self._client
 
+    def _get_spreadsheet(self):
+        if self._spreadsheet is not None:
+            return self._spreadsheet
 
-@router.callback_query(F.data == "clients_back_to_clients")
-async def clients_back_to_clients(callback: CallbackQuery) -> None:
-    if not _is_private_callback(callback):
-        await callback.answer()
-        return
+        client = self._get_client()
+        self._spreadsheet = client.open_by_key(settings.GOOGLE_SHEETS_ID)
+        return self._spreadsheet
 
-    clients = await content_service.get_clients()
-    client_names = [item["client_name"] for item in clients]
+    def get_worksheet(self, title: str):
+        spreadsheet = self._get_spreadsheet()
+        return spreadsheet.worksheet(title)
 
-    if callback.message:
-        await callback.message.edit_text(
-            "Выберите заказчика:",
-            reply_markup=get_clients_keyboard(client_names),
+    def get_all_records(self, sheet_name: str) -> list[dict[str, Any]]:
+        worksheet = self.get_worksheet(sheet_name)
+        return worksheet.get_all_records()
+
+    def append_row(self, sheet_name: str, row: list[Any]) -> None:
+        worksheet = self.get_worksheet(sheet_name)
+        worksheet.append_row(row, value_input_option="USER_ENTERED")
+
+    def ensure_sheet_exists(self, sheet_name: str, headers: list[str]) -> None:
+        spreadsheet = self._get_spreadsheet()
+
+        try:
+            spreadsheet.worksheet(sheet_name)
+        except gspread.WorksheetNotFound:
+            worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=30)
+            worksheet.append_row(headers, value_input_option="USER_ENTERED")
+            logger.info("Создан лист %s", sheet_name)
+
+    def find_user_row_index(self, telegram_id: int) -> int | None:
+        records = self.get_all_records("users")
+        for index, row in enumerate(records, start=2):
+            if str(row.get("telegram_id", "")).strip() == str(telegram_id):
+                return index
+        return None
+
+    def get_user_by_telegram_id(self, telegram_id: int) -> dict[str, Any] | None:
+        records = self.get_all_records("users")
+        for row in records:
+            if str(row.get("telegram_id", "")).strip() == str(telegram_id):
+                return row
+        return None
+
+    def upsert_user(
+        self,
+        telegram_id: int,
+        username: str,
+        first_name: str,
+        last_name: str,
+        full_name_entered: str,
+        phone_entered: str,
+        privacy_policy_accepted: bool = True,
+        terms_of_use_accepted: bool = True,
+    ) -> None:
+        sheet_name = "users"
+        row_index = self.find_user_row_index(telegram_id)
+
+        if row_index is None:
+            row = [
+                str(telegram_id),
+                str(telegram_id),
+                username,
+                first_name,
+                last_name,
+                full_name_entered,
+                phone_entered,
+                now_iso(),
+                "registered",
+                "FALSE",
+                now_iso(),
+                "TRUE" if privacy_policy_accepted else "FALSE",
+                "TRUE" if terms_of_use_accepted else "FALSE",
+            ]
+            self.append_row(sheet_name, row)
+            logger.info("Добавлен новый пользователь telegram_id=%s", telegram_id)
+            return
+
+        existing_user = self.get_user_by_telegram_id(telegram_id) or {}
+
+        worksheet = self.get_worksheet(sheet_name)
+        worksheet.update(
+            f"A{row_index}:M{row_index}",
+            [[
+                str(telegram_id),
+                str(telegram_id),
+                username,
+                first_name,
+                last_name,
+                full_name_entered,
+                phone_entered,
+                existing_user.get("registered_at", now_iso()),
+                "registered",
+                "FALSE",
+                now_iso(),
+                "TRUE" if privacy_policy_accepted else "FALSE",
+                "TRUE" if terms_of_use_accepted else "FALSE",
+            ]],
+        )
+        logger.info("Обновлен пользователь telegram_id=%s", telegram_id)
+
+    def update_user_last_seen(self, telegram_id: int) -> None:
+        row_index = self.find_user_row_index(telegram_id)
+        if row_index is None:
+            return
+
+        worksheet = self.get_worksheet("users")
+        worksheet.update(f"K{row_index}", [[now_iso()]])
+
+    def get_all_users(self) -> list[dict[str, Any]]:
+        return self.get_all_records("users")
+
+    def get_active_admin_ids(self) -> list[int]:
+        records = self.get_all_records("admins")
+        result: list[int] = []
+
+        for row in records:
+            if bool_from_sheet(row.get("is_active")):
+                try:
+                    result.append(int(str(row.get("telegram_id")).strip()))
+                except (TypeError, ValueError):
+                    continue
+
+        return result
+
+    def append_support_request(
+        self,
+        telegram_id: int,
+        username: str,
+        full_name: str,
+        phone: str,
+        message_text: str,
+        forwarded_to_chat: str,
+        status: str = "sent",
+    ) -> None:
+        row = [
+            now_iso(),
+            str(telegram_id),
+            username,
+            full_name,
+            phone,
+            message_text,
+            forwarded_to_chat,
+            status,
+        ]
+        self.append_row("support_requests", row)
+
+    def append_broadcast_log(
+        self,
+        admin_telegram_id: int,
+        admin_name: str,
+        broadcast_type: str,
+        target_type: str,
+        target_value: str,
+        message_text: str,
+        attachment_type: str,
+        attachment_file_id: str,
+        recipient_count: int,
+        success_count: int,
+        fail_count: int,
+        status: str,
+    ) -> None:
+        row = [
+            now_iso(),
+            str(admin_telegram_id),
+            admin_name,
+            broadcast_type,
+            target_type,
+            target_value,
+            message_text,
+            attachment_type,
+            attachment_file_id,
+            recipient_count,
+            success_count,
+            fail_count,
+            status,
+        ]
+        self.append_row("broadcasts_log", row)
+
+    def append_shift_confirmation(
+        self,
+        campaign_id: str,
+        shift_date: str,
+        telegram_id: int,
+        username: str,
+        full_name: str,
+        phone: str,
+        question_text: str,
+        answer: str,
+        answered_at: str,
+    ) -> None:
+        row = [
+            campaign_id,
+            now_iso(),
+            shift_date,
+            str(telegram_id),
+            username,
+            full_name,
+            phone,
+            question_text,
+            answer,
+            answered_at,
+        ]
+        self.append_row("shift_confirmations", row)
+
+    def get_settings_dict(self) -> dict[str, str]:
+        records = self.get_all_records("settings")
+        result: dict[str, str] = {}
+
+        for row in records:
+            key = str(row.get("key", "")).strip()
+            value = str(row.get("value", "")).strip()
+            if key:
+                result[key] = value
+
+        return result
+
+    def find_client_section_row_index(self, client_name: str, section_key: str) -> int | None:
+        records = self.get_all_records("client_sections")
+        for index, row in enumerate(records, start=2):
+            row_client_name = str(row.get("client_name", "")).strip()
+            row_section_key = str(row.get("section_key", "")).strip()
+
+            if row_client_name == client_name and row_section_key == section_key:
+                return index
+        return None
+
+    def update_client_section_file(
+        self,
+        client_name: str,
+        section_key: str,
+        file_id: str,
+        file_type: str,
+    ) -> bool:
+        row_index = self.find_client_section_row_index(client_name, section_key)
+        if row_index is None:
+            return False
+
+        worksheet = self.get_worksheet("client_sections")
+        worksheet.update(f"F{row_index}:G{row_index}", [[file_id, file_type]])
+        return True
+
+    def ensure_required_sheets(self) -> None:
+        self.ensure_sheet_exists(
+            "users",
+            [
+                "user_id",
+                "telegram_id",
+                "username",
+                "first_name",
+                "last_name",
+                "full_name_entered",
+                "phone_entered",
+                "registered_at",
+                "registration_status",
+                "is_blocked",
+                "last_seen_at",
+                "privacy_policy_accepted",
+                "terms_of_use_accepted",
+            ],
         )
 
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("client_open:"))
-async def client_open(callback: CallbackQuery) -> None:
-    if not _is_private_callback(callback):
-        await callback.answer()
-        return
-
-    _, index_str = callback.data.split("client_open:", maxsplit=1)
-
-    try:
-        client_index = int(index_str)
-    except ValueError:
-        await callback.answer("Некорректный заказчик.", show_alert=True)
-        return
-
-    client = await content_service.get_client_by_index(client_index)
-    if not client:
-        await callback.answer("Заказчик не найден.", show_alert=True)
-        return
-
-    if callback.message:
-        await callback.message.edit_text(
-            f"Заказчик: <b>{client['client_name']}</b>\n\nВыберите раздел:",
-            reply_markup=get_client_sections_keyboard(client_index, client["sections"]),
+        self.ensure_sheet_exists(
+            "content",
+            [
+                "key",
+                "title",
+                "text",
+                "buttons_json",
+                "updated_at",
+            ],
         )
 
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("client_back_to_sections:"))
-async def client_back_to_sections(callback: CallbackQuery) -> None:
-    if not _is_private_callback(callback):
-        await callback.answer()
-        return
-
-    _, index_str = callback.data.split("client_back_to_sections:", maxsplit=1)
-
-    try:
-        client_index = int(index_str)
-    except ValueError:
-        await callback.answer("Некорректный заказчик.", show_alert=True)
-        return
-
-    client = await content_service.get_client_by_index(client_index)
-    if not client:
-        await callback.answer("Заказчик не найден.", show_alert=True)
-        return
-
-    if callback.message:
-        await callback.message.answer(
-            f"Заказчик: <b>{client['client_name']}</b>\n\nВыберите раздел:",
-            reply_markup=get_client_sections_keyboard(client_index, client["sections"]),
+        self.ensure_sheet_exists(
+            "faq",
+            [
+                "category",
+                "question",
+                "answer",
+                "sort_order_category",
+                "sort_order_question",
+            ],
         )
 
-    await callback.answer()
+        self.ensure_sheet_exists(
+            "admins",
+            [
+                "telegram_id",
+                "full_name",
+                "is_active",
+            ],
+        )
+
+        self.ensure_sheet_exists(
+            "broadcasts_log",
+            [
+                "created_at",
+                "admin_telegram_id",
+                "admin_name",
+                "broadcast_type",
+                "target_type",
+                "target_value",
+                "message_text",
+                "attachment_type",
+                "attachment_file_id",
+                "recipient_count",
+                "success_count",
+                "fail_count",
+                "status",
+            ],
+        )
+
+        self.ensure_sheet_exists(
+            "support_requests",
+            [
+                "created_at",
+                "telegram_id",
+                "username",
+                "full_name",
+                "phone",
+                "message_text",
+                "forwarded_to_chat",
+                "status",
+            ],
+        )
+
+        self.ensure_sheet_exists(
+            "settings",
+            [
+                "key",
+                "value",
+            ],
+        )
+
+        self.ensure_sheet_exists(
+            "shift_confirmations",
+            [
+                "campaign_id",
+                "created_at",
+                "shift_date",
+                "telegram_id",
+                "username",
+                "full_name",
+                "phone",
+                "question_text",
+                "answer",
+                "answered_at",
+            ],
+        )
+
+        self.ensure_sheet_exists(
+            "first_day_flow",
+            [
+                "step",
+                "title",
+                "text",
+                "buttons_json",
+            ],
+        )
+
+        self.ensure_sheet_exists(
+            "client_sections",
+            [
+                "client_name",
+                "section_key",
+                "section_title",
+                "text",
+                "buttons_json",
+                "file_id",
+                "file_type",
+                "sort_order",
+            ],
+        )
 
 
-@router.callback_query(F.data.startswith("client_section:"))
-async def client_section_open(callback: CallbackQuery) -> None:
-    if not _is_private_callback(callback):
-        await callback.answer()
-        return
-
-    parts = callback.data.split(":")
-    if len(parts) != 3:
-        await callback.answer("Некорректные данные.", show_alert=True)
-        return
-
-    _, client_index_str, section_index_str = parts
-
-    try:
-        client_index = int(client_index_str)
-        section_index = int(section_index_str)
-    except ValueError:
-        await callback.answer("Некорректные данные.", show_alert=True)
-        return
-
-    client = await content_service.get_client_by_index(client_index)
-    if not client:
-        await callback.answer("Заказчик не найден.", show_alert=True)
-        return
-
-    sections = client["sections"]
-    if section_index < 0 or section_index >= len(sections):
-        await callback.answer("Раздел не найден.", show_alert=True)
-        return
-
-    section = sections[section_index]
-
-    text = str(section.get("text", "")).strip()
-    file_id = str(section.get("file_id", "")).strip()
-    buttons = section.get("buttons", [])
-    section_title = str(section.get("section_title", "")).strip()
-
-    if callback.message:
-        if text:
-            await callback.message.answer(
-                f"<b>{section_title}</b>\n\n{text}",
-                reply_markup=get_client_section_actions_keyboard(client_index, buttons),
-            )
-        else:
-            await callback.message.answer(
-                f"<b>{section_title}</b>",
-                reply_markup=get_client_section_actions_keyboard(client_index, buttons),
-            )
-
-        if file_id:
-            try:
-                await callback.message.answer_document(document=file_id)
-            except Exception:
-                await callback.message.answer("Не удалось отправить файл из этого раздела.")
-
-    await callback.answer()
+sheets_service = GoogleSheetsService()
